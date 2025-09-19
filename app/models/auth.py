@@ -95,3 +95,41 @@ class CognitoTokenRequest(BaseModel):
         if v not in allowed_types:
             raise ValueError(f'Grant type must be one of: {allowed_types}')
         return v
+
+
+class SignupRequest(BaseModel):
+    """Request model for user signup via Cognito."""
+    email: str
+    password: str
+    confirm_password: str
+
+    def validate_passwords(self):
+        if self.password != self.confirm_password:
+            raise ValueError("Passwords do not match")
+        if len(self.password) < 8:
+            raise ValueError("Password must be at least 8 characters")
+        return True
+
+
+class ConfirmSignupRequest(BaseModel):
+    """Request model for confirming a newly signed up user."""
+    email: str
+    confirmation_code: str
+
+    @validator('confirmation_code')
+    def code_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Confirmation code cannot be empty')
+        return v.strip()
+
+
+class LoginRequest(BaseModel):
+    """Request model for username/password login."""
+    email: str
+    password: str
+
+    @validator('password')
+    def password_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Password cannot be empty')
+        return v

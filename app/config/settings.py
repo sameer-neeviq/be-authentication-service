@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     
     # Cognito Configuration
     cognito_domain: HttpUrl
-    cognito_region: str = "us-east-1"
+    cognito_region: str = "ap-south-1"
     cognito_user_pool_id: str
     cognito_app_client_id: str
     cognito_app_client_secret: Optional[str] = None
@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     refresh_token_ttl_seconds: int = 604800  # 7 days
     
     # Application
-    app_name: str = "Auth BFF"
+    app_name: str = "Authentication Service"
     debug: bool = False
     log_level: str = "INFO"
     
