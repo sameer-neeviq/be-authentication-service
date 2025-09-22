@@ -223,17 +223,26 @@ class AuthService(LoggerMixin):
     
     async def get_auth_status(self, request: Request) -> AuthStatusResponse:
         """Get current authentication status."""
+        # Look for ID token in cookie first, then Authorization header
         id_token = request.cookies.get(self.cookie_manager.ID_COOKIE)
-        
-        # TODO: Add proper JWT validation here
-        authenticated = bool(id_token)
-        
-        self.logger.debug(f"Auth status check: authenticated={authenticated}")
-        
-        return AuthStatusResponse(
-            authenticated=authenticated,
-            user_info=None  # TODO: Extract user info from validated ID token
-        )
+        if not id_token:
+            # Try Authorization: Bearer <token>
+            auth_header = request.headers.get('authorization') or request.headers.get('Authorization')
+            if auth_header and auth_header.lower().startswith('bearer '):
+                id_token = auth_header.split(' ', 1)[1].strip()
+
+        if not id_token:
+            self.logger.debug("Auth status check: no id_token present")
+            return AuthStatusResponse(authenticated=False, user_info=None)
+
+        # Verify the ID token and return claims as user_info
+        try:
+            claims = await self._verify_id_token(id_token)
+            self.logger.debug(f"Auth status verified for sub={claims.get('sub')}")
+            return AuthStatusResponse(authenticated=True, user_info=claims)
+        except Exception as e:
+            self.logger.warning(f"ID token verification failed in get_auth_status: {e}")
+            return AuthStatusResponse(authenticated=False, user_info=None)
 
     async def signup_user(self, email: str, password: str) -> dict:
         """Sign up a new user using Cognito SignUp API."""

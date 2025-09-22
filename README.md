@@ -1,6 +1,6 @@
 # Authentication Service
 
-A FastAPI-based Backend for Frontend (BFF) authentication service that handles OAuth2/OIDC flows with AWS Cognito.
+A FastAPI-based Backend authentication service that handles OAuth2/OIDC flows with AWS Cognito.
 
 ## Features
 
