@@ -21,6 +21,7 @@ class AWSClient(LoggerMixin):
     def __init__(self, region_name: Optional[str] = None):
         self.region = region_name or settings.cognito_region
         self._boto_session = boto3.session.Session(region_name=self.region)
+        self.client_secret = settings.cognito_app_client_secret
 
     def cognito_idp_client(self):
         """Return a boto3 Cognito Identity Provider client.
@@ -149,3 +150,30 @@ class AWSClient(LoggerMixin):
         except BotoCoreError as e:
             self.logger.error(f"Boto core error during initiate_auth: {e}")
             raise RuntimeError(f"AWS error: {e}")
+        
+    
+    def refresh_auth(self, refresh_token: str, username: str) -> dict:
+        """
+        Use REFRESH_TOKEN_AUTH to get new AccessToken (and often IdToken).
+        If your app client has a secret, 'username' is required to compute SECRET_HASH.
+        """
+        client = self.cognito_idp_client()
+
+        params = {
+            "AuthFlow": "REFRESH_TOKEN_AUTH",
+            "ClientId": settings.cognito_app_client_id,
+            "AuthParameters": {
+                "REFRESH_TOKEN": refresh_token,
+            },
+        }
+
+        # Compute SECRET_HASH if we have a client secret (same pattern as your other methods)
+        if settings.cognito_app_client_secret and username:
+            message = (username + settings.cognito_app_client_id).encode('utf-8')
+            dig = hmac.new(settings.cognito_app_client_secret.encode('utf-8'), message, hashlib.sha256).digest()
+            secret_hash = base64.b64encode(dig).decode()
+            params["AuthParameters"]["SECRET_HASH"] = secret_hash
+
+        resp = client.initiate_auth(**params)
+        return resp.get("AuthenticationResult", {})
+    

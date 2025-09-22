@@ -17,14 +17,30 @@ from fastapi.responses import RedirectResponse
 from app.utils import generate_state, make_pkce_pair
 from ..config.settings import settings
 from ..models.auth import StateRecord, AuthStatusResponse
-# from ..utils import make_pkce_pair, generate_state
+from ..services.aws_client import AWSClient as _AWSClient
 from .cognito_client import CognitoClient
-from ..exceptions.auth_exceptions import InvalidStateException, MissingTokenException
+from ..exceptions.auth_exceptions import InvalidStateException, MissingTokenException, CognitoAPIException
 from ..middleware.logging_config import LoggerMixin
 from ..utils.state_store import state_store
 from ..utils.cookies import CookieManager
+from jose import jwt
 
 
+def _extract_username_from_id_token(id_jwt: str) -> Optional[str]:
+    """
+    Extract the Cognito username (or email) from an ID token.
+    Uses unverified decode — only for pulling claims, NOT for auth.
+    """
+    try:
+        claims = jwt.get_unverified_claims(id_jwt)
+        return (
+            claims.get("cognito:username")
+            or claims.get("username")
+            or claims.get("email")
+        )
+    except Exception:
+        return None
+    
 class AuthService(LoggerMixin):
     """Service for handling authentication operations."""
     
@@ -33,81 +49,67 @@ class AuthService(LoggerMixin):
         self.cookie_manager = CookieManager()
         # simple in-memory JWKS cache: { 'jwks': {...}, 'fetched_at': epoch }
         self._jwks_cache: Dict[str, object] = {}
-    
-    async def handle_callback(
-        self,
-        code: str,
-        state: str,
-        response: Response
-    ) -> RedirectResponse:
-        """Handle OAuth2 callback and exchange code for tokens."""
-        self.logger.info("Handling OAuth2 callback")
-        
-        # Retrieve and validate state
-        state_record = await state_store.retrieve(state)
-        if not state_record:
-            self.logger.warning(f"Invalid state in callback: {state[:8]}...")
-            raise InvalidStateException()
-        
-        try:
-            # Exchange code for tokens
-            token_response = await self.cognito_client.exchange_code_for_tokens(
-                code=code,
-                code_verifier=state_record.verifier,
-                redirect_uri=str(settings.redirect_uri)
-            )
-            
-            # Set authentication cookies
-            self.cookie_manager.set_auth_cookies(
-                response=response,
-                access_token=token_response.access_token,
-                id_token=token_response.id_token,
-                refresh_token=token_response.refresh_token
-            )
-            
-            self.logger.info("Successfully completed OAuth2 callback")
-            return RedirectResponse(state_record.redirect_to)
-            
-        except Exception as e:
-            self.logger.error(f"Error during callback handling: {e}")
-            raise
+        self.client_secret = settings.cognito_app_client_secret
     
     async def refresh_tokens(self, request: Request, response: Response) -> dict:
-        """Refresh access and ID tokens."""
-        self.logger.info("Refreshing tokens")
-        
-        # Get refresh token from cookie
+        """
+        Refresh access/ID tokens using the refresh token cookie, via Cognito IDP.
+        Mirrors the login flow and avoids Hosted UI networking issues.
+        """
+        self.logger.info("Refreshing tokens via Cognito IDP")
+
+        # 1) Get refresh token
         refresh_token = request.cookies.get(self.cookie_manager.REFRESH_COOKIE)
         if not refresh_token:
             self.logger.warning("Missing refresh token in request")
             raise MissingTokenException("refresh token")
-        
+
+        # 2) Resolve username only IF a client secret exists
+        username = None
+        if self.client_secret:
+            # try username cookie first (if you set one at login)
+            username = request.cookies.get(getattr(self.cookie_manager, "USERNAME_COOKIE", "username"))
+            if not username:
+                # fallback: decode from ID token claims
+                id_jwt = request.cookies.get(self.cookie_manager.ID_COOKIE)
+                if id_jwt:
+                    username = _extract_username_from_id_token(id_jwt)
+
+            if not username:
+                self.logger.error("Username required to compute SECRET_HASH for IDP refresh but not found")
+                raise CognitoAPIException("Cannot refresh: missing username context")
+
+        # 3) Call Cognito IDP
         try:
-            # Refresh tokens with Cognito
-            token_response = await self.cognito_client.refresh_tokens(refresh_token)
-            
-            # Update cookies with new tokens
+            aws = _AWSClient()  # uses your settings inside
+            ar = aws.refresh_auth(refresh_token=refresh_token, username=username or "")
+        except Exception as e:
+            self.logger.exception("Cognito IDP refresh call failed")
+            raise CognitoAPIException("Error communicating with Cognito IDP")
+
+        # 4) Set new cookies
+        access_token = ar.get("AccessToken")
+        id_token = ar.get("IdToken")
+
+        if access_token:
             self.cookie_manager.set_cookie(
                 response,
                 self.cookie_manager.ACCESS_COOKIE,
-                token_response.access_token,
-                settings.access_token_ttl_seconds
+                access_token,
+                settings.access_token_ttl_seconds,
+                path="/",
             )
-            
-            if token_response.id_token:
-                self.cookie_manager.set_cookie(
-                    response,
-                    self.cookie_manager.ID_COOKIE,
-                    token_response.id_token,
-                    settings.access_token_ttl_seconds
-                )
-            
-            self.logger.info("Successfully refreshed tokens")
-            return {"success": True}
-            
-        except Exception as e:
-            self.logger.error(f"Error during token refresh: {e}")
-            raise
+        if id_token:
+            self.cookie_manager.set_cookie(
+                response,
+                self.cookie_manager.ID_COOKIE,
+                id_token,
+                settings.access_token_ttl_seconds,
+                path="/",
+            )
+
+        self.logger.info("Successfully refreshed tokens")
+        return {"success": True}
     
     async def logout(self, request: Request, response: Response) -> RedirectResponse:
         """Logout user and clear cookies.
@@ -249,7 +251,6 @@ class AuthService(LoggerMixin):
         self.logger.info(f"Signing up user: {email}")
         # Use AWSClient wrapper to register user
         # import locally to avoid circular imports at module load
-        from ..services.aws_client import AWSClient as _AWSClient
 
         aws = _AWSClient()
         resp = aws.sign_up(username=email, password=password, user_attributes={"email": email})
@@ -258,7 +259,6 @@ class AuthService(LoggerMixin):
     async def confirm_signup(self, email: str, confirmation_code: str) -> dict:
         """Confirm a signed up user with the provided confirmation code."""
         self.logger.info(f"Confirming signup for: {email}")
-        from ..services.aws_client import AWSClient as _AWSClient
 
         aws = _AWSClient()
         resp = aws.confirm_sign_up(username=email, confirmation_code=confirmation_code)
@@ -267,7 +267,6 @@ class AuthService(LoggerMixin):
     async def login_user(self, email: str, password: str, response: Response) -> dict:
         """Authenticate a user using email/password and set auth cookies on success."""
         self.logger.info(f"Logging in user: {email}")
-        from ..services.aws_client import AWSClient as _AWSClient
 
         aws = _AWSClient()
         auth_result = aws.initiate_auth(username=email, password=password)
@@ -283,6 +282,14 @@ class AuthService(LoggerMixin):
             self.cookie_manager.set_cookie(response, self.cookie_manager.ID_COOKIE, id_token, settings.access_token_ttl_seconds)
         if refresh_token:
             self.cookie_manager.set_cookie(response, self.cookie_manager.REFRESH_COOKIE, refresh_token, settings.refresh_token_ttl_seconds, path='/auth/')
+
+        self.cookie_manager.set_cookie(
+            response,
+            self.cookie_manager.USERNAME_COOKIE,
+            email,
+            settings.refresh_token_ttl_seconds,
+            path="/auth/"
+        )
 
         return auth_result
     

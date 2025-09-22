@@ -22,61 +22,8 @@ def get_auth_service() -> AuthService:
     return AuthService()
 
 
-@router.get("/callback", response_class=RedirectResponse)
-async def callback(
-    code: str = Query(..., description="Authorization code from Cognito"),
-    state: str = Query(..., description="State parameter for CSRF protection"),
-    response: Response = Response(),
-    auth_service: AuthService = Depends(get_auth_service)
-) -> RedirectResponse:
-    """
-    Handle OAuth2 callback from Cognito.
-    
-    - **code**: Authorization code from Cognito
-    - **state**: State parameter for CSRF protection
-    """
-    logger.info("Callback endpoint called")
-    return await auth_service.handle_callback(code, state, response)
 
-
-@router.post("/refresh", response_model=SuccessResponse)
-async def refresh(
-    request: Request,
-    response: Response,
-    auth_service: AuthService = Depends(get_auth_service)
-) -> SuccessResponse:
-    """
-    Refresh access and ID tokens using refresh token from cookie.
-    """
-    logger.info("Refresh endpoint called")
-    result = await auth_service.refresh_tokens(request, response)
-    return SuccessResponse(data=result)
-
-
-@router.post("/logout", response_class=RedirectResponse)
-async def logout(
-    request: Request,
-    response: Response,
-    auth_service: AuthService = Depends(get_auth_service)
-) -> RedirectResponse:
-    """
-    Logout user and clear authentication cookies.
-    """
-    logger.info("Logout endpoint called")
-    return await auth_service.logout(request, response)
-
-
-@router.get("/me", response_model=AuthStatusResponse)
-async def me(
-    request: Request,
-    auth_service: AuthService = Depends(get_auth_service)
-) -> AuthStatusResponse:
-    """
-    Get current authentication status and user information.
-    """
-    logger.debug("Auth status endpoint called")
-    return await auth_service.get_auth_status(request)
-
+from fastapi import HTTPException, status
 
 @router.post("/signup", response_model=dict)
 async def signup_post(
@@ -85,12 +32,29 @@ async def signup_post(
 ) -> dict:
     """
     Create a new user in the Cognito user pool using email + password.
+    Returns user-friendly error messages for UI display.
     """
-    logger.info("Signup POST endpoint called")
-    # Validate passwords
-    signup.validate_passwords()
-    result = await auth_service.signup_user(signup.email, signup.password)
-    return {"success": True, "result": result}
+    try:
+        signup.validate_passwords()
+        result = await auth_service.signup_user(signup.email, signup.password)
+        return {"success": True, "result": result}
+    except Exception as e:
+        user_msg = None
+        # boto3 ClientError
+        if hasattr(e, "response") and hasattr(e, "operation_name"):
+            error_msg = e.response["Error"].get("Message")
+            if error_msg:
+                user_msg = error_msg
+        # Fallback: try to parse from string
+        if not user_msg:
+            msg = str(e)
+            # If message contains ':', take the part after the last ':'
+            if ":" in msg:
+                user_msg = msg.split(":")[-1].strip()
+            else:
+                user_msg = msg
+        # logger.error(f"Signup failed: {user_msg}")
+        return {"success": False, "error": user_msg}
 
 
 @router.post("/confirm", response_model=dict)
@@ -102,8 +66,22 @@ async def confirm_signup(
     Confirm a Cognito signup using the confirmation code delivered to the user.
     """
     logger.info("Confirm signup endpoint called")
-    result = await auth_service.confirm_signup(confirm.email, confirm.confirmation_code)
-    return {"success": True, "result": result}
+    try:
+        result = await auth_service.confirm_signup(confirm.email, confirm.confirmation_code)
+        return {"success": True, "result": result}
+    except Exception as e:
+        user_msg = None
+        if hasattr(e, "response") and hasattr(e, "operation_name"):
+            error_msg = e.response["Error"].get("Message")
+            if error_msg:
+                user_msg = error_msg
+        if not user_msg:
+            msg = str(e)
+            if ":" in msg:
+                user_msg = msg.split(":")[-1].strip()
+            else:
+                user_msg = msg
+        return {"success": False, "error": user_msg}
 
 
 
@@ -117,5 +95,73 @@ async def login(
     Authenticate user with email and password (server-side) and set auth cookies.
     """
     logger.info("Login POST endpoint called")
-    result = await auth_service.login_user(login.email, login.password, response)
-    return {"success": True, "result": result}
+    try:
+        result = await auth_service.login_user(login.email, login.password, response)
+        return {"success": True, "result": result}
+    except Exception as e:
+        user_msg = None
+        if hasattr(e, "response") and hasattr(e, "operation_name"):
+            error_msg = e.response["Error"].get("Message")
+            if error_msg:
+                user_msg = error_msg
+        if not user_msg:
+            msg = str(e)
+            if ":" in msg:
+                user_msg = msg.split(":")[-1].strip()
+            else:
+                user_msg = msg
+        return {"success": False, "error": user_msg}
+
+
+@router.get("/me", response_model=AuthStatusResponse)
+async def me(
+    request: Request,
+    auth_service: AuthService = Depends(get_auth_service)
+) -> AuthStatusResponse:
+    """
+    Get current authentication status and user information.
+    Using the Access Token from the cookie.
+    """
+    logger.debug("Auth status endpoint called")
+    return await auth_service.get_auth_status(request)
+
+
+@router.post("/refresh", response_model=SuccessResponse)
+async def refresh(
+    request: Request,
+    response: Response,
+    auth_service: AuthService = Depends(get_auth_service),
+) -> SuccessResponse:
+    """
+    Refresh access and ID tokens using refresh token from cookie.
+    """
+    logger.info("Refresh endpoint called")
+    try:
+        result = await auth_service.refresh_tokens(request, response)
+        return SuccessResponse(data=result)
+    except Exception as e:
+        user_msg = None
+        if hasattr(e, "response") and hasattr(e, "operation_name"):
+            error_msg = e.response["Error"].get("Message")
+            if error_msg:
+                user_msg = error_msg
+        if not user_msg:
+            msg = str(e)
+            if ":" in msg:
+                user_msg = msg.split(":")[-1].strip()
+            else:
+                user_msg = msg
+        return SuccessResponse(data={"success": False, "error": user_msg})
+
+
+@router.post("/logout", response_class=RedirectResponse)
+async def logout(
+    request: Request,
+    response: Response,
+    auth_service: AuthService = Depends(get_auth_service)
+) -> RedirectResponse:
+    """
+    Logout user and clear authentication cookies.
+    """
+    logger.info("Logout endpoint called")
+    return await auth_service.logout(request, response)

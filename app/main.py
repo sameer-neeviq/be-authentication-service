@@ -18,12 +18,12 @@ async def lifespan(app: FastAPI):
     # Startup
     setup_logging()
     logger = get_logger("main")
-    logger.info("Starting Auth BFF service")
+    logger.info("Starting Auth service")
 
     yield
 
     # Shutdown
-    logger.info("Shutting down Auth BFF service")
+    logger.info("Shutting down Auth service")
 
 
 app = FastAPI(
