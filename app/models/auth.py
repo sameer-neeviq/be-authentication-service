@@ -133,3 +133,19 @@ class LoginRequest(BaseModel):
         if not v or not v.strip():
             raise ValueError('Password cannot be empty')
         return v
+    
+class ResendRequest(BaseModel):
+    email: str
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+class ResetPasswordRequest(BaseModel):
+    email: str
+    code: str
+    new_password: str
+
+
+# --- Change Password API ---
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str

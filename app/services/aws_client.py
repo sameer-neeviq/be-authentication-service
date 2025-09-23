@@ -7,7 +7,6 @@ uses the project's `settings` for configuration.
 from typing import Optional, Dict, Any
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
-
 from ..config.settings import settings
 from ..middleware.logging_config import LoggerMixin
 import hmac
@@ -176,4 +175,121 @@ class AWSClient(LoggerMixin):
 
         resp = client.initiate_auth(**params)
         return resp.get("AuthenticationResult", {})
+    
+    def resend_confirmation_code(self, email: str) -> dict:
+        """
+        Resend Cognito signup confirmation code to the given email (username).
+        """
+        client = self.cognito_idp_client()
+        params = {
+            'ClientId': settings.cognito_app_client_id,
+            'Username': email
+        }
+        # If the app client has a secret, compute SECRET_HASH
+        if settings.cognito_app_client_secret:
+            secret_hash = self._compute_secret_hash(email)
+            params['SecretHash'] = secret_hash
+        try:
+            self.logger.info(f"Resending confirmation code to {email}")
+            resp = client.resend_confirmation_code(**params)
+            return resp
+        except ClientError as e:
+            self.logger.error(f"Cognito client error: {e}")
+            raise RuntimeError(f"Cognito resend_confirmation_code failed: {e}")
+        except BotoCoreError as e:
+            self.logger.error(f"Boto core error: {e}")
+            raise RuntimeError(f"AWS error: {e}")
+
+    def _compute_secret_hash(self, username: str) -> str:
+        """
+        Compute Cognito SECRET_HASH for username using app client secret.
+        """
+        key = settings.cognito_app_client_secret.encode('utf-8')
+        msg = (username + settings.cognito_app_client_id).encode('utf-8')
+        dig = hmac.new(key, msg, hashlib.sha256).digest()
+        return base64.b64encode(dig).decode()
+    
+    def forgot_password(self, email: str) -> dict:
+        """
+        Initiate Cognito forgot password flow (send reset code to email/username).
+        """
+        client = self.cognito_idp_client()
+        params = {
+            'ClientId': settings.cognito_app_client_id,
+            'Username': email
+        }
+        if settings.cognito_app_client_secret:
+            secret_hash = self._compute_secret_hash(email)
+            params['SecretHash'] = secret_hash
+        try:
+            self.logger.info(f"Initiating forgot password for {email}")
+            resp = client.forgot_password(**params)
+            return resp
+        except ClientError as e:
+            self.logger.error(f"Cognito forgot_password error: {e}")
+            raise RuntimeError(f"Cognito forgot_password failed: {e}")
+        except BotoCoreError as e:
+            self.logger.error(f"Boto core error during forgot_password: {e}")
+            raise RuntimeError(f"AWS error: {e}")
+
+    def reset_password(self, email: str, code: str, new_password: str) -> dict:
+        """
+        Confirm Cognito password reset with code and new password.
+        """
+        client = self.cognito_idp_client()
+        params = {
+            'ClientId': settings.cognito_app_client_id,
+            'Username': email,
+            'ConfirmationCode': code,
+            'Password': new_password
+        }
+        if settings.cognito_app_client_secret:
+            secret_hash = self._compute_secret_hash(email)
+            params['SecretHash'] = secret_hash
+        try:
+            self.logger.info(f"Resetting password for {email}")
+            resp = client.confirm_forgot_password(**params)
+            return resp
+        except ClientError as e:
+            self.logger.error(f"Cognito reset_password error: {e}")
+            raise RuntimeError(f"Cognito reset_password failed: {e}")
+        except BotoCoreError as e:
+            self.logger.error(f"Boto core error during reset_password: {e}")
+            raise RuntimeError(f"AWS error: {e}")
+
+    def change_password(self, access_token: str, old_password: str, new_password: str) -> dict:
+        """
+        Change password for authenticated user using Cognito access token.
+        """
+        client = self.cognito_idp_client()
+        try:
+            self.logger.info("Changing password for authenticated user")
+            resp = client.change_password(
+                PreviousPassword=old_password,
+                ProposedPassword=new_password,
+                AccessToken=access_token
+            )
+            return resp
+        except ClientError as e:
+            self.logger.error(f"Cognito change_password error: {e}")
+            raise RuntimeError(f"Cognito change_password failed: {e}")
+        except BotoCoreError as e:
+            self.logger.error(f"Boto core error during change_password: {e}")
+            raise RuntimeError(f"AWS error: {e}")
+        
+    def logout_all(self, access_token: str) -> dict:
+        """
+        Global sign-out for the user (invalidates all tokens for the user).
+        """
+        client = self.cognito_idp_client()
+        try:
+            self.logger.info("Performing global sign-out for user")
+            resp = client.global_sign_out(AccessToken=access_token)
+            return resp
+        except ClientError as e:
+            self.logger.error(f"Cognito global_sign_out error: {e}")
+            raise RuntimeError(f"Cognito global_sign_out failed: {e}")
+        except BotoCoreError as e:
+            self.logger.error(f"Boto core error during global_sign_out: {e}")
+            raise RuntimeError(f"AWS error: {e}")
     

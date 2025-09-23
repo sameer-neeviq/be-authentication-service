@@ -2,16 +2,16 @@
 Authentication routes.
 """
 from typing import Optional
-from fastapi import APIRouter, Request, Response, Depends, Query
+from fastapi import APIRouter, Request, Response, \
+    HTTPException, status, Depends, Query
 from fastapi.responses import RedirectResponse
-
-from ..models.auth import AuthStatusResponse
-from ..models.auth import SignupRequest
 from ..models.responses import SuccessResponse
 from ..services.auth_service import AuthService
-from ..models.auth import ConfirmSignupRequest
-from ..models.auth import LoginRequest
 from ..middleware.logging_config import get_logger
+from ..models.auth import ResendRequest, AuthStatusResponse, \
+    SignupRequest, ConfirmSignupRequest, LoginRequest, \
+    ResendRequest, ForgotPasswordRequest, \
+    ResetPasswordRequest, ChangePasswordRequest
 
 logger = get_logger("auth_router")
 router = APIRouter(prefix="/auth", tags=["authentication"])
@@ -22,9 +22,6 @@ def get_auth_service() -> AuthService:
     return AuthService()
 
 
-
-from fastapi import HTTPException, status
-
 @router.post("/signup", response_model=dict)
 async def signup_post(
     signup: SignupRequest,
@@ -32,7 +29,6 @@ async def signup_post(
 ) -> dict:
     """
     Create a new user in the Cognito user pool using email + password.
-    Returns user-friendly error messages for UI display.
     """
     try:
         signup.validate_passwords()
@@ -65,7 +61,6 @@ async def confirm_signup(
     """
     Confirm a Cognito signup using the confirmation code delivered to the user.
     """
-    logger.info("Confirm signup endpoint called")
     try:
         result = await auth_service.confirm_signup(confirm.email, confirm.confirmation_code)
         return {"success": True, "result": result}
@@ -94,7 +89,6 @@ async def login(
     """
     Authenticate user with email and password (server-side) and set auth cookies.
     """
-    logger.info("Login POST endpoint called")
     try:
         result = await auth_service.login_user(login.email, login.password, response)
         return {"success": True, "result": result}
@@ -122,7 +116,6 @@ async def me(
     Get current authentication status and user information.
     Using the Access Token from the cookie.
     """
-    logger.debug("Auth status endpoint called")
     return await auth_service.get_auth_status(request)
 
 
@@ -135,7 +128,6 @@ async def refresh(
     """
     Refresh access and ID tokens using refresh token from cookie.
     """
-    logger.info("Refresh endpoint called")
     try:
         result = await auth_service.refresh_tokens(request, response)
         return SuccessResponse(data=result)
@@ -163,5 +155,121 @@ async def logout(
     """
     Logout user and clear authentication cookies.
     """
-    logger.info("Logout endpoint called")
     return await auth_service.logout(request, response)
+
+
+@router.post("/resend", response_model=dict)
+async def resend_confirmation(
+    req: ResendRequest,
+    auth_service: AuthService = Depends(get_auth_service)
+) -> dict:
+    """Resend signup confirmation code to user's email."""
+    try:
+        result = await auth_service.resend_confirmation_code(req.email)
+        return {"success": True, "result": result}
+    except Exception as e:
+        user_msg = None
+        if hasattr(e, "response") and hasattr(e, "operation_name"):
+            error_msg = e.response["Error"].get("Message")
+            if error_msg:
+                user_msg = error_msg
+        if not user_msg:
+            msg = str(e)
+            if ":" in msg:
+                user_msg = msg.split(":")[-1].strip()
+            else:
+                user_msg = msg
+        return {"success": False, "error": user_msg}
+    
+@router.post("/forgot-password", response_model=dict)
+async def forgot_password(
+    req: ForgotPasswordRequest,
+    auth_service: AuthService = Depends(get_auth_service)
+) -> dict:
+    """Send a password reset code to user's email."""
+    try:
+        result = await auth_service.forgot_password(req.email)
+        return {"success": True, "result": result}
+    except Exception as e:
+        user_msg = None
+        if hasattr(e, "response") and hasattr(e, "operation_name"):
+            error_msg = e.response["Error"].get("Message")
+            if error_msg:
+                user_msg = error_msg
+        if not user_msg:
+            msg = str(e)
+            if ":" in msg:
+                user_msg = msg.split(":")[-1].strip()
+            else:
+                user_msg = msg
+        return {"success": False, "error": user_msg}
+
+@router.post("/reset-password", response_model=dict)
+async def reset_password(
+    req: ResetPasswordRequest,
+    auth_service: AuthService = Depends(get_auth_service)
+) -> dict:
+    """Reset password using code sent to email."""
+    try:
+        result = await auth_service.reset_password(req.email, req.code, req.new_password)
+        return {"success": True, "result": result}
+    except Exception as e:
+        user_msg = None
+        if hasattr(e, "response") and hasattr(e, "operation_name"):
+            error_msg = e.response["Error"].get("Message")
+            if error_msg:
+                user_msg = error_msg
+        if not user_msg:
+            msg = str(e)
+            if ":" in msg:
+                user_msg = msg.split(":")[-1].strip()
+            else:
+                user_msg = msg
+        return {"success": False, "error": user_msg}
+
+@router.post("/change-password", response_model=dict)
+async def change_password(
+    req: ChangePasswordRequest,
+    request: Request,
+    auth_service: AuthService = Depends(get_auth_service)
+) -> dict:
+    """Change password for authenticated user."""
+    try:
+        result = await auth_service.change_password(request, req.old_password, req.new_password)
+        return {"success": True, "result": result}
+    except Exception as e:
+        user_msg = None
+        if hasattr(e, "response") and hasattr(e, "operation_name"):
+            error_msg = e.response["Error"].get("Message")
+            if error_msg:
+                user_msg = error_msg
+        if not user_msg:
+            msg = str(e)
+            if ":" in msg:
+                user_msg = msg.split(":")[-1].strip()
+            else:
+                user_msg = msg
+        return {"success": False, "error": user_msg}
+    
+@router.post("/logout-all", response_model=dict)
+async def logout_all(
+    request: Request,
+    auth_service: AuthService = Depends(get_auth_service)
+) -> dict:
+    """Log out user from all devices (global sign-out)."""
+    try:
+        result = await auth_service.logout_all(request)
+        return {"success": True, "result": result}
+    except Exception as e:
+        user_msg = None
+        if hasattr(e, "response") and hasattr(e, "operation_name"):
+            error_msg = e.response["Error"].get("Message")
+            if error_msg:
+                user_msg = error_msg
+        if not user_msg:
+            msg = str(e)
+            if ":" in msg:
+                user_msg = msg.split(":")[-1].strip()
+            else:
+                user_msg = msg
+        return {"success": False, "error": user_msg}

@@ -240,7 +240,6 @@ class AuthService(LoggerMixin):
         # Verify the ID token and return claims as user_info
         try:
             claims = await self._verify_id_token(id_token)
-            self.logger.debug(f"Auth status verified for sub={claims.get('sub')}")
             return AuthStatusResponse(authenticated=True, user_info=claims)
         except Exception as e:
             self.logger.warning(f"ID token verification failed in get_auth_status: {e}")
@@ -248,7 +247,6 @@ class AuthService(LoggerMixin):
 
     async def signup_user(self, email: str, password: str) -> dict:
         """Sign up a new user using Cognito SignUp API."""
-        self.logger.info(f"Signing up user: {email}")
         # Use AWSClient wrapper to register user
         # import locally to avoid circular imports at module load
 
@@ -258,7 +256,6 @@ class AuthService(LoggerMixin):
 
     async def confirm_signup(self, email: str, confirmation_code: str) -> dict:
         """Confirm a signed up user with the provided confirmation code."""
-        self.logger.info(f"Confirming signup for: {email}")
 
         aws = _AWSClient()
         resp = aws.confirm_sign_up(username=email, confirmation_code=confirmation_code)
@@ -266,7 +263,6 @@ class AuthService(LoggerMixin):
 
     async def login_user(self, email: str, password: str, response: Response) -> dict:
         """Authenticate a user using email/password and set auth cookies on success."""
-        self.logger.info(f"Logging in user: {email}")
 
         aws = _AWSClient()
         auth_result = aws.initiate_auth(username=email, password=password)
@@ -293,3 +289,82 @@ class AuthService(LoggerMixin):
 
         return auth_result
     
+    async def resend_confirmation_code(self, email: str) -> dict:
+        """
+        Resend Cognito signup confirmation code to the given email.
+        """
+        try:
+            aws_client = _AWSClient()
+            result = aws_client.resend_confirmation_code(email)
+            return {"message": "Confirmation code resent", "result": result}
+        except Exception as e:
+            self.logger.error(f"Failed to resend confirmation code: {e}")
+            raise
+
+    async def forgot_password(self, email: str) -> dict:
+        """
+        Initiate Cognito forgot password flow (send reset code to email).
+        """
+        try:
+            aws_client = _AWSClient()
+            result = aws_client.forgot_password(email)
+            return {"message": "Password reset code sent", "result": result}
+        except Exception as e:
+            self.logger.error(f"Failed to initiate forgot password: {e}")
+            raise
+
+    async def reset_password(self, email: str, code: str, new_password: str) -> dict:
+        """
+        Confirm Cognito password reset with code and new password.
+        """
+        try:
+            aws_client = _AWSClient()
+            result = aws_client.reset_password(email, code, new_password)
+            return {"message": "Password has been reset", "result": result}
+        except Exception as e:
+            self.logger.error(f"Failed to reset password: {e}")
+            raise
+
+    async def change_password(self, request: Request, old_password: str, new_password: str) -> dict:
+        """
+        Change password for authenticated user (requires access token).
+        """
+        # Extract access token from cookie or Authorization header
+        access_token = request.cookies.get(self.cookie_manager.ACCESS_COOKIE)
+        if not access_token:
+            auth_header = request.headers.get("authorization")
+            if auth_header and auth_header.lower().startswith("bearer "):
+                access_token = auth_header[7:]
+        if not access_token:
+            self.logger.error("Missing access token for change password")
+            raise Exception("Missing access token")
+        self.logger.info("Changing password for authenticated user")
+        try:
+            aws_client = _AWSClient()
+            result = aws_client.change_password(access_token, old_password, new_password)
+            return {"message": "Password changed successfully", "result": result}
+        except Exception as e:
+            self.logger.error(f"Failed to change password: {e}")
+            raise
+
+    async def logout_all(self, request: Request) -> dict:
+        """
+        Log out user from all devices (global sign-out).
+        """
+        # Extract access token from cookie or Authorization header
+        access_token = request.cookies.get(self.cookie_manager.ACCESS_COOKIE)
+        if not access_token:
+            auth_header = request.headers.get("authorization")
+            if auth_header and auth_header.lower().startswith("bearer "):
+                access_token = auth_header[7:]
+        if not access_token:
+            self.logger.error("Missing access token for global logout")
+            raise Exception("Missing access token")
+        self.logger.info("Global logout for authenticated user")
+        try:
+            aws_client = _AWSClient()
+            result = aws_client.logout_all(access_token)
+            return {"message": "User logged out from all devices", "result": result}
+        except Exception as e:
+            self.logger.error(f"Failed to global logout: {e}")
+            raise
