@@ -47,6 +47,16 @@ class Settings(BaseSettings):
     
     # External API timeouts
     cognito_timeout_seconds: int = 10
+
+    # database
+    PROJECT_NAME: str = "Authentication Service"
+    VERSION: str = "1.0.0"
+    DATABASE_URL: str
+    SECRET_KEY: str = "your-secret-key-here"
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    ALLOWED_HOSTS: List[str] = ["*"]
+    ENVIRONMENT: str = "development"
     
     @validator('cognito_domain', pre=True)
     def validate_cognito_domain(cls, v):
