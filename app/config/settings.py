@@ -29,7 +29,11 @@ class Settings(BaseSettings):
     secure_cookies: bool = False
     
     # CORS Configuration
-    cors_origins: List[str] = ["http://localhost:5173"]
+    cors_origins: List[str] = [
+        "http://localhost:5173", 
+        "http://localhost:5174", 
+        "http://127.0.0.1:5174",
+    ]
     
     # Security
     state_ttl_seconds: int = 600  # 10 minutes
