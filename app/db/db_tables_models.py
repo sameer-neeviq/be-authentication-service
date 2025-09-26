@@ -19,7 +19,6 @@ class UserAppProfile(Base):
     oauth_provider = Column(String(20))
     oauth_provider_id = Column(String(100))
     provider_profile_data = Column(JSONB)
-    app_specific_data = Column(JSONB)
     last_login_at = Column(TIMESTAMP)
     login_count = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
@@ -38,7 +37,8 @@ class UserSession(Base):
     __tablename__ = 'user_sessions'
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     cognito_user_id = Column(String(255), nullable=False)
-    session_token = Column(String(255), unique=True, nullable=False)
+    session_token = Column(String(255), nullable=False)  # unique constraint removed
+    refresh_token = Column(Text)
     user_agent = Column(Text)
     created_at = Column(TIMESTAMP, server_default="CURRENT_TIMESTAMP")
     expires_at = Column(TIMESTAMP, nullable=False)

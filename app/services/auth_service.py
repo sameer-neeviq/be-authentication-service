@@ -1,7 +1,7 @@
 """
 Authentication service for handling OAuth2 flows.
 """
-import time
+import uuid
 from typing import Optional
 from urllib.parse import urlencode
 from fastapi import Request, Response
@@ -13,6 +13,9 @@ import httpx
 from jose import jwk, jwt
 from jose.utils import base64url_decode
 from fastapi.responses import RedirectResponse
+from app.db.db_tables_models import UserSession
+from sqlalchemy import func
+from datetime import datetime, timedelta
 
 from app.utils import generate_state, make_pkce_pair
 from ..config.settings import settings
@@ -20,10 +23,12 @@ from ..models.auth import StateRecord, AuthStatusResponse
 from ..services.aws_client import AWSClient as _AWSClient
 from .cognito_client import CognitoClient
 from ..exceptions.auth_exceptions import InvalidStateException, MissingTokenException, CognitoAPIException
+from app.db.db_tables_models import UserAppProfile, UserRole, AuthAuditLog
 from ..middleware.logging_config import LoggerMixin
 from ..utils.state_store import state_store
 from ..utils.cookies import CookieManager
-from jose import jwt
+
+
 
 
 def _extract_username_from_id_token(id_jwt: str) -> Optional[str]:
@@ -51,10 +56,10 @@ class AuthService(LoggerMixin):
         self._jwks_cache: Dict[str, object] = {}
         self.client_secret = settings.cognito_app_client_secret
     
-    async def refresh_tokens(self, request: Request, response: Response) -> dict:
+    async def refresh_tokens(self, request: Request, response: Response, db) -> dict:
         """
         Refresh access/ID tokens using the refresh token cookie, via Cognito IDP.
-        Mirrors the login flow and avoids Hosted UI networking issues.
+        Mirrors the login flow.
         """
         self.logger.info("Refreshing tokens via Cognito IDP")
 
@@ -67,17 +72,21 @@ class AuthService(LoggerMixin):
         # 2) Resolve username only IF a client secret exists
         username = None
         if self.client_secret:
-            # try username cookie first (if you set one at login)
+            # Try username cookie first (if you set one at login)
             username = request.cookies.get(getattr(self.cookie_manager, "USERNAME_COOKIE", "username"))
+            self.logger.debug(f"Tried username from cookie: {username}")
             if not username:
-                # fallback: decode from ID token claims
+                # Fallback: decode from ID token claims
                 id_jwt = request.cookies.get(self.cookie_manager.ID_COOKIE)
                 if id_jwt:
                     username = _extract_username_from_id_token(id_jwt)
+                    self.logger.debug(f"Tried username from ID token: {username}")
+
+            # Optionally: try to extract from request headers or other context here
 
             if not username:
-                self.logger.error("Username required to compute SECRET_HASH for IDP refresh but not found")
-                raise CognitoAPIException("Cannot refresh: missing username context")
+                self.logger.error("Username required to compute SECRET_HASH for IDP refresh but not found in cookie or ID token")
+                raise CognitoAPIException("Cannot refresh: missing username context. Please re-login.")
 
         # 3) Call Cognito IDP
         try:
@@ -91,46 +100,49 @@ class AuthService(LoggerMixin):
         access_token = ar.get("AccessToken")
         id_token = ar.get("IdToken")
 
-        if access_token:
-            self.cookie_manager.set_cookie(
-                response,
-                self.cookie_manager.ACCESS_COOKIE,
-                access_token,
-                settings.access_token_ttl_seconds,
-                path="/",
+        if refresh_token:
+            expires_at = datetime.utcnow() + timedelta(seconds=settings.refresh_token_ttl_seconds)
+            session_token = str(uuid.uuid4())
+            session_id = uuid.uuid4()
+            # Extract cognito_user_id from the ID token if possible
+            id_jwt = request.cookies.get(self.cookie_manager.ID_COOKIE)
+            cognito_user_id = None
+            if id_jwt:
+                claims = jwt.get_unverified_claims(id_jwt)
+                cognito_user_id = claims.get("sub") or claims.get("cognito:username") or claims.get("username") or claims.get("email")
+            # Extract user_agent from request headers if available
+            user_agent = request.headers.get("user-agent", None)
+            user_session = UserSession(
+                id=session_id,
+                cognito_user_id=cognito_user_id,
+                session_token=session_token,
+                refresh_token=refresh_token,
+                user_agent=user_agent,
+                created_at=func.now(),
+                expires_at=expires_at,
+                last_accessed=func.now(),
+                is_active=True
             )
-        if id_token:
-            self.cookie_manager.set_cookie(
-                response,
-                self.cookie_manager.ID_COOKIE,
-                id_token,
-                settings.access_token_ttl_seconds,
-                path="/",
-            )
+            db.add(user_session)
 
         self.logger.info("Successfully refreshed tokens")
         return {"success": True}
     
-    async def logout(self, request: Request, response: Response) -> RedirectResponse:
-        """Logout user and clear cookies.
-
-        Reads the ID token from cookies (if present), decodes the JWT payload
-        without verifying the signature to identify which user is being
-        logged out, logs and prints that information, clears cookies, and
-        redirects to the Cognito logout URL.
-        """
+    async def logout(self, request: Request, response: Response, db) -> RedirectResponse:
+        """Logout user, clear cookies, mark session inactive, and log event."""
         self.logger.info("Logging out user")
 
-        # Try to identify user from ID token in cookies and verify signature via JWKS
+        # Identify user/session from cookies
         id_token = request.cookies.get(self.cookie_manager.ID_COOKIE)
+        refresh_token = request.cookies.get(self.cookie_manager.REFRESH_COOKIE)
+        session_token = request.cookies.get(self.cookie_manager.SESSION_COOKIE, None) if hasattr(self.cookie_manager, 'SESSION_COOKIE') else None
+        cognito_user_id = None
         if id_token:
             try:
                 claims = await self._verify_id_token(id_token)
-                user_id = claims.get('sub') or claims.get('email') or claims.get('username') or '<unknown>'
-                self.logger.info(f"Verified logout for user: {user_id}")
-                print(f"Verified logout for user: {user_id}")
+                cognito_user_id = claims.get('sub') or claims.get('email') or claims.get('username') or '<unknown>'
+                self.logger.info(f"Verified logout for user: {cognito_user_id}")
             except Exception as e:
-                # Verification failed; fall back to unverified decode for logging only
                 self.logger.warning(f"ID token verification failed: {e}; falling back to unverified decode for logging")
                 try:
                     parts = id_token.split('.')
@@ -141,9 +153,8 @@ class AuthService(LoggerMixin):
                             payload_b64 += '=' * (4 - rem)
                         payload_bytes = base64.urlsafe_b64decode(payload_b64.encode('utf-8'))
                         claims = json.loads(payload_bytes.decode('utf-8'))
-                        user_id = claims.get('sub') or claims.get('email') or claims.get('username') or '<unknown>'
-                        self.logger.info(f"Logging out (unverified) user: {user_id}")
-                        print(f"Logging out (unverified) user: {user_id}")
+                        cognito_user_id = claims.get('sub') or claims.get('email') or claims.get('username') or '<unknown>'
+                        self.logger.info(f"Logging out (unverified) user: {cognito_user_id}")
                     else:
                         self.logger.info("ID token present but JWT format is invalid")
                 except Exception as e2:
@@ -151,19 +162,43 @@ class AuthService(LoggerMixin):
         else:
             self.logger.info("No ID token cookie found; logging out anonymous session")
 
+        # Mark user session as inactive in DB
+        try:
+            session_query = db.query(UserSession).filter(UserSession.is_active == True)
+            if cognito_user_id:
+                session_query = session_query.filter(UserSession.cognito_user_id == cognito_user_id)
+            if refresh_token:
+                session_query = session_query.filter(UserSession.refresh_token == refresh_token)
+            if session_token:
+                session_query = session_query.filter(UserSession.session_token == session_token)
+            updated = session_query.update({UserSession.is_active: False, UserSession.last_accessed: func.now()})
+            db.commit()
+            self.logger.info(f"Marked {updated} user session(s) as inactive for logout.")
+        except Exception as e:
+            db.rollback()
+            self.logger.error(f"Failed to mark user session inactive on logout: {e}")
+
+        # Log logout event
+        try:
+            audit_log = AuthAuditLog(
+                cognito_user_id=cognito_user_id,
+                event_type="logout",
+                event_status="success",
+                event_category="user",
+                user_agent=request.headers.get("user-agent")
+            )
+            db.add(audit_log)
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            self.logger.error(f"Failed to log logout event: {e}")
+
         # Clear authentication cookies
         self.cookie_manager.clear_auth_cookies(response)
 
-        # Build Cognito logout URL
-        logout_params = {
-            "client_id": settings.cognito_app_client_id,
-            "logout_uri": str(settings.post_logout_redirect)
-        }
-        logout_url = f"{settings.cognito_domain}/logout?{urlencode(logout_params)}"
-        self.logger.debug(f"logout_url: {logout_url}")
-
-        self.logger.info("User logged out successfully")
-        return RedirectResponse(logout_url)
+        # For non-Hosted UI: just return a JSON response after clearing cookies and updating DB
+        self.logger.info("User logged out successfully (no Hosted UI redirect)")
+        return {"message": "User logged out successfully"}
 
     async def _fetch_jwks(self) -> Dict[str, object]:
         """Fetch JWKS from Cognito and cache it for a short time (async)."""
@@ -245,29 +280,75 @@ class AuthService(LoggerMixin):
             self.logger.warning(f"ID token verification failed in get_auth_status: {e}")
             return AuthStatusResponse(authenticated=False, user_info=None)
 
-    async def signup_user(self, email: str, password: str) -> dict:
-        """Sign up a new user using Cognito SignUp API."""
-        # Use AWSClient wrapper to register user
-        # import locally to avoid circular imports at module load
-
+    async def signup_user(self, email: str, password: str, db, user_agent: str = None) -> dict:
+        """Sign up a new user using Cognito SignUp API, create user profile, role, and log."""
         aws = _AWSClient()
         resp = aws.sign_up(username=email, password=password, user_attributes={"email": email})
+        user_sub = resp.get("UserSub")
+        # Create user profile
+        
+        user_profile = UserAppProfile(
+            cognito_user_id=user_sub,
+            email=email,
+            oauth_provider="cognito",
+            oauth_provider_id=user_sub,
+            is_active=False
+        )
+        db.add(user_profile)
+        db.flush()
+        # Assign default role 'client'
+        user_role = UserRole(
+            cognito_user_id=user_sub,
+            role_name="client",
+            is_active=False
+        )
+        db.add(user_role)
+        # Log event
+        audit_log = AuthAuditLog(
+            cognito_user_id=user_sub,
+            event_type="signup",
+            event_status="success",
+            event_category="user",
+            user_agent=user_agent
+        )
+        db.add(audit_log)
+        db.commit()
         return resp
 
-    async def confirm_signup(self, email: str, confirmation_code: str) -> dict:
-        """Confirm a signed up user with the provided confirmation code."""
-
+    async def confirm_signup(self, email: str, confirmation_code: str, db, user_agent: str = None) -> dict:
+        """Confirm a signed up user with the provided confirmation code and log event."""
         aws = _AWSClient()
         resp = aws.confirm_sign_up(username=email, confirmation_code=confirmation_code)
+
+        # Look up user profile by email
+        user_profile = db.query(UserAppProfile).filter_by(email=email).first()
+        cognito_user_id = user_profile.cognito_user_id if user_profile else None
+        # Set user as active if found
+        if user_profile:
+            user_profile.is_active = True
+        # Set user role as active if found
+        user_role = db.query(UserRole).filter_by(cognito_user_id=cognito_user_id).first()
+        if user_role:
+            user_role.is_active = True
+        # Flush changes to ensure updates are tracked
+        db.flush()
+        # Log event with correct cognito_user_id
+        audit_log = AuthAuditLog(
+            cognito_user_id=cognito_user_id,
+            event_type="confirm_signup",
+            event_status="success",
+            event_category="user",
+            user_agent=user_agent
+        )
+        db.add(audit_log)
+        db.commit()
         return resp
 
-    async def login_user(self, email: str, password: str, response: Response) -> dict:
-        """Authenticate a user using email/password and set auth cookies on success."""
-
+    async def login_user(self, email: str, password: str, response: Response, db=None, user_agent: str = None) -> dict:
+        """Authenticate a user using email/password, set auth cookies, update profile, and log login."""
         aws = _AWSClient()
         auth_result = aws.initiate_auth(username=email, password=password)
 
-        # auth_result may include AccessToken, IdToken, RefreshToken, ExpiresIn
         access_token = auth_result.get('AccessToken')
         id_token = auth_result.get('IdToken')
         refresh_token = auth_result.get('RefreshToken')
@@ -287,47 +368,135 @@ class AuthService(LoggerMixin):
             path="/auth/"
         )
 
+        # Update user profile, log login, and create session if db is provided
+        if db is not None:
+            user_profile = db.query(UserAppProfile).filter_by(email=email).first()
+            # self.logger.info(f"[LOGIN] user_profile: {user_profile}")
+            cognito_user_id = user_profile.cognito_user_id if user_profile else None
+            # self.logger.info(f"[LOGIN] cognito_user_id: {cognito_user_id}")
+
+            if user_profile:
+                user_profile.last_login_at = func.now()
+                user_profile.login_count = (user_profile.login_count or 0) + 1
+            # Log login event
+            audit_log = AuthAuditLog(
+                cognito_user_id=cognito_user_id,
+                event_type="login",
+                event_status="success",
+                event_category="user",
+                user_agent=user_agent
+            )
+            db.add(audit_log)
+            # Create user session with unique session_token (uuid4) and store refresh_token
+            if refresh_token:
+                expires_at = datetime.utcnow() + timedelta(seconds=settings.refresh_token_ttl_seconds)
+                session_token = str(uuid.uuid4())
+                # self.logger.info(f"[LOGIN] Creating UserSession: cognito_user_id={cognito_user_id}, session_token={session_token}, refresh_token={refresh_token}, user_agent={user_agent}, expires_at={expires_at}")
+                try:
+                    user_session = UserSession(
+                        cognito_user_id=cognito_user_id,
+                        session_token=session_token,
+                        refresh_token=refresh_token,
+                        user_agent=user_agent,
+                        created_at=func.now(),
+                        expires_at=expires_at,
+                        last_accessed=func.now(),
+                        is_active=True
+                    )
+                    db.add(user_session)
+                    db.commit()
+                    # self.logger.info(f"[LOGIN] UserSession committed successfully: session_token={session_token}")
+                except Exception as e:
+                    db.rollback()
+                    # self.logger.error(f"[LOGIN] Error committing UserSession: {e}")
+                    raise
+
         return auth_result
     
-    async def resend_confirmation_code(self, email: str) -> dict:
+    async def resend_confirmation_code(self, email: str, db=None, user_agent: str = None) -> dict:
         """
-        Resend Cognito signup confirmation code to the given email.
+        Resend Cognito signup confirmation code to the given email. Logs event if db provided.
         """
         try:
             aws_client = _AWSClient()
             result = aws_client.resend_confirmation_code(email)
+            # Log event if db is provided
+            if db is not None:
+                user_profile = db.query(UserAppProfile).filter_by(email=email).first()
+                cognito_user_id = user_profile.cognito_user_id if user_profile else None
+                audit_log = AuthAuditLog(
+                    cognito_user_id=cognito_user_id,
+                    event_type="resend_confirmation_code",
+                    event_status="success",
+                    event_category="user",
+                    user_agent=user_agent
+                )
+                db.add(audit_log)
+                db.commit()
             return {"message": "Confirmation code resent", "result": result}
         except Exception as e:
+            if db is not None:
+                db.rollback()
             self.logger.error(f"Failed to resend confirmation code: {e}")
             raise
 
-    async def forgot_password(self, email: str) -> dict:
+    async def forgot_password(self, email: str, db=None, user_agent: str = None) -> dict:
         """
-        Initiate Cognito forgot password flow (send reset code to email).
+        Initiate Cognito forgot password flow (send reset code to email). Logs event if db provided.
         """
         try:
             aws_client = _AWSClient()
             result = aws_client.forgot_password(email)
+            # Log event if db is provided
+            if db is not None:
+                user_profile = db.query(UserAppProfile).filter_by(email=email).first()
+                cognito_user_id = user_profile.cognito_user_id if user_profile else None
+                audit_log = AuthAuditLog(
+                    cognito_user_id=cognito_user_id,
+                    event_type="forgot_password",
+                    event_status="success",
+                    event_category="user",
+                    user_agent=user_agent
+                )
+                db.add(audit_log)
+                db.commit()
             return {"message": "Password reset code sent", "result": result}
         except Exception as e:
+            if db is not None:
+                db.rollback()
             self.logger.error(f"Failed to initiate forgot password: {e}")
             raise
 
-    async def reset_password(self, email: str, code: str, new_password: str) -> dict:
+    async def reset_password(self, email: str, code: str, new_password: str, db=None, user_agent: str = None) -> dict:
         """
-        Confirm Cognito password reset with code and new password.
+        Confirm Cognito password reset with code and new password. Logs event if db provided.
         """
         try:
             aws_client = _AWSClient()
             result = aws_client.reset_password(email, code, new_password)
+            # Log event if db is provided
+            if db is not None:
+                user_profile = db.query(UserAppProfile).filter_by(email=email).first()
+                cognito_user_id = user_profile.cognito_user_id if user_profile else None
+                audit_log = AuthAuditLog(
+                    cognito_user_id=cognito_user_id,
+                    event_type="reset_password",
+                    event_status="success",
+                    event_category="user",
+                    user_agent=user_agent
+                )
+                db.add(audit_log)
+                db.commit()
             return {"message": "Password has been reset", "result": result}
         except Exception as e:
+            if db is not None:
+                db.rollback()
             self.logger.error(f"Failed to reset password: {e}")
             raise
 
-    async def change_password(self, request: Request, old_password: str, new_password: str) -> dict:
+    async def change_password(self, request: Request, old_password: str, new_password: str, db=None, user_agent: str = None) -> dict:
         """
-        Change password for authenticated user (requires access token).
+        Change password for authenticated user (requires access token). Logs event if db provided.
         """
         # Extract access token from cookie or Authorization header
         access_token = request.cookies.get(self.cookie_manager.ACCESS_COOKIE)
@@ -342,14 +511,34 @@ class AuthService(LoggerMixin):
         try:
             aws_client = _AWSClient()
             result = aws_client.change_password(access_token, old_password, new_password)
+            # Log event if db is provided
+            if db is not None:
+                # Try to extract user info from access token
+                cognito_user_id = None
+                try:
+                    claims = jwt.get_unverified_claims(access_token)
+                    cognito_user_id = claims.get('sub') or claims.get('email') or claims.get('username') or None
+                except Exception:
+                    pass
+                audit_log = AuthAuditLog(
+                    cognito_user_id=cognito_user_id,
+                    event_type="change_password",
+                    event_status="success",
+                    event_category="user",
+                    user_agent=user_agent
+                )
+                db.add(audit_log)
+                db.commit()
             return {"message": "Password changed successfully", "result": result}
         except Exception as e:
+            if db is not None:
+                db.rollback()
             self.logger.error(f"Failed to change password: {e}")
             raise
 
-    async def logout_all(self, request: Request) -> dict:
+    async def logout_all(self, request: Request, db) -> dict:
         """
-        Log out user from all devices (global sign-out).
+        Log out user from all devices (global sign-out), mark all sessions inactive, and log event.
         """
         # Extract access token from cookie or Authorization header
         access_token = request.cookies.get(self.cookie_manager.ACCESS_COOKIE)
@@ -361,6 +550,43 @@ class AuthService(LoggerMixin):
             self.logger.error("Missing access token for global logout")
             raise Exception("Missing access token")
         self.logger.info("Global logout for authenticated user")
+
+        # Identify user from access token (decode JWT)
+        cognito_user_id = None
+        try:
+            claims = jwt.get_unverified_claims(access_token)
+            cognito_user_id = claims.get('sub') or claims.get('email') or claims.get('username') or '<unknown>'
+        except Exception as e:
+            self.logger.warning(f"Failed to decode access token for logout-all: {e}")
+
+        # Mark all user sessions as inactive in DB
+        try:
+            session_query = db.query(UserSession).filter(UserSession.is_active == True)
+            if cognito_user_id:
+                session_query = session_query.filter(UserSession.cognito_user_id == cognito_user_id)
+            updated = session_query.update({UserSession.is_active: False, UserSession.last_accessed: func.now()})
+            db.commit()
+            self.logger.info(f"Marked {updated} user session(s) as inactive for logout-all.")
+        except Exception as e:
+            db.rollback()
+            self.logger.error(f"Failed to mark user sessions inactive on logout-all: {e}")
+
+        # Log logout-all event
+        try:
+            audit_log = AuthAuditLog(
+                cognito_user_id=cognito_user_id,
+                event_type="logout_all",
+                event_status="success",
+                event_category="user",
+                user_agent=request.headers.get("user-agent")
+            )
+            db.add(audit_log)
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            self.logger.error(f"Failed to log logout-all event: {e}")
+
+        # Call Cognito global sign-out
         try:
             aws_client = _AWSClient()
             result = aws_client.logout_all(access_token)
