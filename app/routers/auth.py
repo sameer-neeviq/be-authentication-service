@@ -14,6 +14,7 @@ from ..models.auth import ResendRequest, AuthStatusResponse, \
     ResetPasswordRequest, ChangePasswordRequest
 from ..db.database import get_db
 from sqlalchemy.orm import Session
+from app.middleware.session_dependency import get_current_user_from_session
 
 logger = get_logger("auth_router")
 router = APIRouter(prefix="/auth", tags=["authentication"])
@@ -125,11 +126,12 @@ async def login(
 @router.get("/me", response_model=AuthStatusResponse)
 async def me(
     request: Request,
+    user=Depends(get_current_user_from_session),
     auth_service: AuthService = Depends(get_auth_service)
 ) -> AuthStatusResponse:
     """
     Get current authentication status and user information.
-    Using the Access Token from the cookie.
+    Using the session token from the cookie.
     """
     return await auth_service.get_auth_status(request)
 
@@ -162,11 +164,37 @@ async def refresh(
         return SuccessResponse(data={"success": False, "error": user_msg})
 
 
+@router.post("/logout-all", response_model=dict)
+async def logout_all(
+    request: Request,
+    user=Depends(get_current_user_from_session),
+    auth_service: AuthService = Depends(get_auth_service),
+    db: Session = Depends(get_db)
+) -> dict:
+    """Log out user from all devices (global sign-out)."""
+    try:
+        result = await auth_service.logout_all(request, db)
+        return {"success": True, "result": result}
+    except Exception as e:
+        user_msg = None
+        if hasattr(e, "response") and hasattr(e, "operation_name"):
+            error_msg = e.response["Error"].get("Message")
+            if error_msg:
+                user_msg = error_msg
+        if not user_msg:
+            msg = str(e)
+            if ":" in msg:
+                user_msg = msg.split(":")[-1].strip()
+            else:
+                user_msg = msg
+        return {"success": False, "error": user_msg}
+
 @router.post("/logout", response_class=RedirectResponse)
 async def logout(
     request: Request,
     response: Response,
     auth_service: AuthService = Depends(get_auth_service),
+    user=Depends(get_current_user_from_session),
     db: Session = Depends(get_db)
 ) -> RedirectResponse:
     """
@@ -260,6 +288,7 @@ async def reset_password(
 async def change_password(
     req: ChangePasswordRequest,
     request: Request,
+    user=Depends(get_current_user_from_session),
     auth_service: AuthService = Depends(get_auth_service),
     db: Session = Depends(get_db)
 ) -> dict:

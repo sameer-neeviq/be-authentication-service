@@ -368,12 +368,21 @@ class AuthService(LoggerMixin):
             path="/auth/"
         )
 
+        # Generate and set dedicated session token
+        session_token = str(uuid.uuid4())
+        session_expires_at = datetime.utcnow() + timedelta(seconds=settings.refresh_token_ttl_seconds)
+        self.cookie_manager.set_cookie(
+            response,
+            "session_token",
+            session_token,
+            settings.refresh_token_ttl_seconds,
+            path="/"
+        )
+
         # Update user profile, log login, and create session if db is provided
         if db is not None:
             user_profile = db.query(UserAppProfile).filter_by(email=email).first()
-            # self.logger.info(f"[LOGIN] user_profile: {user_profile}")
             cognito_user_id = user_profile.cognito_user_id if user_profile else None
-            # self.logger.info(f"[LOGIN] cognito_user_id: {cognito_user_id}")
 
             if user_profile:
                 user_profile.last_login_at = func.now()
@@ -387,29 +396,23 @@ class AuthService(LoggerMixin):
                 user_agent=user_agent
             )
             db.add(audit_log)
-            # Create user session with unique session_token (uuid4) and store refresh_token
-            if refresh_token:
-                expires_at = datetime.utcnow() + timedelta(seconds=settings.refresh_token_ttl_seconds)
-                session_token = str(uuid.uuid4())
-                # self.logger.info(f"[LOGIN] Creating UserSession: cognito_user_id={cognito_user_id}, session_token={session_token}, refresh_token={refresh_token}, user_agent={user_agent}, expires_at={expires_at}")
-                try:
-                    user_session = UserSession(
-                        cognito_user_id=cognito_user_id,
-                        session_token=session_token,
-                        refresh_token=refresh_token,
-                        user_agent=user_agent,
-                        created_at=func.now(),
-                        expires_at=expires_at,
-                        last_accessed=func.now(),
-                        is_active=True
-                    )
-                    db.add(user_session)
-                    db.commit()
-                    # self.logger.info(f"[LOGIN] UserSession committed successfully: session_token={session_token}")
-                except Exception as e:
-                    db.rollback()
-                    # self.logger.error(f"[LOGIN] Error committing UserSession: {e}")
-                    raise
+            # Always create user session with session_token and store refresh_token if present
+            try:
+                user_session = UserSession(
+                    cognito_user_id=cognito_user_id,
+                    session_token=session_token,
+                    refresh_token=refresh_token,
+                    user_agent=user_agent,
+                    created_at=func.now(),
+                    expires_at=session_expires_at,
+                    last_accessed=func.now(),
+                    is_active=True
+                )
+                db.add(user_session)
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                raise
 
         return auth_result
     
