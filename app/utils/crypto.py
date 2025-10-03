@@ -1,9 +1,12 @@
-"""
-Cryptographic utilities for PKCE and other security operations.
+"""Cryptographic utilities for PKCE and other security operations.
+
+This module holds the helpers previously located at `app/utils.py`.
 """
 import base64
 import os
 import hashlib
+from typing import Callable
+
 from ..models.auth import PKCEPair
 
 

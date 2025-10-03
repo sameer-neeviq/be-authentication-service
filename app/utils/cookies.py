@@ -14,6 +14,7 @@ class CookieManager(LoggerMixin):
     ACCESS_COOKIE = "access_token"
     REFRESH_COOKIE = "refresh_token"
     ID_COOKIE = "id_token"
+    USERNAME_COOKIE = "username"
     
     def set_cookie(
         self,
@@ -81,7 +82,7 @@ class CookieManager(LoggerMixin):
                 self.REFRESH_COOKIE,
                 refresh_token,
                 settings.refresh_token_ttl_seconds,
-                path="/auth/"  # Narrower path for security
+                path="/auth/"
             )
     
     def clear_auth_cookies(self, response: Response) -> None:

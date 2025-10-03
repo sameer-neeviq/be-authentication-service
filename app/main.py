@@ -18,17 +18,17 @@ async def lifespan(app: FastAPI):
     # Startup
     setup_logging()
     logger = get_logger("main")
-    logger.info("Starting Auth BFF service")
+    logger.info("Starting Auth service")
 
     yield
 
     # Shutdown
-    logger.info("Shutting down Auth BFF service")
+    logger.info("Shutting down Auth service")
 
 
 app = FastAPI(
     title=settings.app_name,
-    description="Backend for Frontend Authentication Service with AWS Cognito",
+    description="Backend Authentication Service with AWS Cognito",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -40,7 +40,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 

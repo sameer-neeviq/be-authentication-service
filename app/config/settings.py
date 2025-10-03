@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     
     # Cognito Configuration
     cognito_domain: HttpUrl
-    cognito_region: str = "us-east-1"
+    cognito_region: str = "ap-south-1"
     cognito_user_pool_id: str
     cognito_app_client_id: str
     cognito_app_client_secret: Optional[str] = None
@@ -29,7 +29,12 @@ class Settings(BaseSettings):
     secure_cookies: bool = False
     
     # CORS Configuration
-    cors_origins: List[str] = ["http://localhost:5173"]
+    cors_origins: List[str] = [
+        "http://localhost:5173", 
+        "http://localhost:5174", 
+        "http://127.0.0.1:5174",
+        "http://localhost:3000",
+    ]
     
     # Security
     state_ttl_seconds: int = 600  # 10 minutes
@@ -37,12 +42,22 @@ class Settings(BaseSettings):
     refresh_token_ttl_seconds: int = 604800  # 7 days
     
     # Application
-    app_name: str = "Auth BFF"
+    app_name: str = "Authentication Service"
     debug: bool = False
     log_level: str = "INFO"
     
     # External API timeouts
     cognito_timeout_seconds: int = 10
+
+    # database
+    PROJECT_NAME: str = "Authentication Service"
+    VERSION: str = "1.0.0"
+    DATABASE_URL: str
+    SECRET_KEY: str = "your-secret-key-here"
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    ALLOWED_HOSTS: List[str] = ["*"]
+    ENVIRONMENT: str = "development"
     
     @validator('cognito_domain', pre=True)
     def validate_cognito_domain(cls, v):

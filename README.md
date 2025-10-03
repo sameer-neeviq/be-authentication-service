@@ -1,6 +1,6 @@
-# Auth BFF - Authentication Service
+# Authentication Service
 
-A FastAPI-based Backend for Frontend (BFF) authentication service that handles OAuth2/OIDC flows with AWS Cognito.
+A FastAPI-based Backend authentication service that handles OAuth2/OIDC flows with AWS Cognito.
 
 ## Features
 
@@ -64,3 +64,38 @@ pytest tests/
 - Use Redis or database for state storage (currently in-memory)
 - Configure proper CORS origins for your frontend
 - Add JWT token validation for enhanced security
+
+## Using boto3 / AWS SDK
+
+This project can use boto3 to call AWS services (for example, Cognito admin
+operations). To get started:
+
+1. Install dependencies (boto3 was added to `requirements.txt`):
+
+```bash
+pip install -r requirements.txt
+```
+
+2. Provide AWS credentials using one of the standard methods:
+	- Environment variables: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally `AWS_SESSION_TOKEN`.
+	- Shared credentials file: `~/.aws/credentials`.
+	- IAM role when running on AWS (EC2, ECS, Lambda, etc.).
+
+3. Example: use the small wrapper in `app/services/aws_client.py` to call
+	Cognito's `admin_get_user`:
+
+```python
+from app.services.aws_client import AWSClient
+
+client = AWSClient()
+resp = client.admin_get_user('some-username')
+print(resp)
+```
+
+4. The wrapper uses `app/config/settings.py` for region and user pool id. Set
+	`COGNITO_REGION` and `COGNITO_USER_POOL_ID` in your `.env` or environment.
+
+Notes:
+- boto3 picks up credentials and region automatically from the environment.
+- For higher-level AWS functionality consider using `aioboto3` if you need
+  async clients.
