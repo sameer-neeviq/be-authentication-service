@@ -56,7 +56,7 @@ class UserRole(Base):
     __tablename__ = 'user_roles'
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     cognito_user_id = Column(String(255), nullable=False)
-    role_name = Column(String(50), nullable=False)
+    role_name = Column(JSONB, nullable=False)  # Now stores a list of roles
     permissions = Column(JSONB)
     resource_scope = Column(JSONB)
     granted_at = Column(TIMESTAMP, server_default="CURRENT_TIMESTAMP")

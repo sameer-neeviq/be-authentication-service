@@ -384,9 +384,28 @@ class AuthService(LoggerMixin):
             user_profile = db.query(UserAppProfile).filter_by(email=email).first()
             cognito_user_id = user_profile.cognito_user_id if user_profile else None
 
+            # Extract groups from ID token if present
+            groups = []
+            if id_token:
+                try:
+                    claims = jwt.get_unverified_claims(id_token)
+                    groups = claims.get('cognito:groups', [])
+                except Exception:
+                    pass
+
+            # Update or create user_roles entry with groups as JSON array
+            if cognito_user_id:
+                user_role = db.query(UserRole).filter_by(cognito_user_id=cognito_user_id).first()
+                if user_role:
+                    user_role.role_name = groups
+                else:
+                    user_role = UserRole(cognito_user_id=cognito_user_id, role_name=groups)
+                    db.add(user_role)
+
             if user_profile:
                 user_profile.last_login_at = func.now()
                 user_profile.login_count = (user_profile.login_count or 0) + 1
+
             # Log login event
             audit_log = AuthAuditLog(
                 cognito_user_id=cognito_user_id,
